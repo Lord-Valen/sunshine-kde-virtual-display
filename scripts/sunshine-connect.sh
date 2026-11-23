@@ -12,6 +12,18 @@ source "$DIR/display-backend.sh"
 PHYS_FILE="$HOME/.local/share/sunshine-physical-outputs.list"
 INHIBIT_PIDFILE="$HOME/.local/share/sunshine-inhibit.pid"
 
+# --- Reconcile: recover from a crashed/aborted session ----------------------
+# A previous session may have left physical outputs disabled (its disconnect
+# hook never ran, e.g. krfb crashed). Re-enable them before snapshotting so
+# the machine is never left blind and the snapshot below is fresh.
+if [ -s "$PHYS_FILE" ]; then
+    while read -r name; do
+        [ -n "$name" ] && kscreen-doctor "output.$name.enable" >> "$LOG" 2>&1
+    done < "$PHYS_FILE"
+    rm -f "$PHYS_FILE"
+    log "connect: reconcile re-enabled physical outputs from previous session"
+fi
+
 W="${SUNSHINE_CLIENT_WIDTH:-1920}"; H="${SUNSHINE_CLIENT_HEIGHT:-1080}"
 RES="${W}x${H}"
 log "connect: client requested ${RES} @ ${SUNSHINE_CLIENT_FPS:-?}fps"
@@ -45,9 +57,9 @@ systemd-inhibit --what=idle:sleep:handle-lid-switch --who=sunshine \
 echo "$!" > "$INHIBIT_PIDFILE"
 
 # --- 3. go headless: record + disable physical outputs ----------------------
-# Snapshot the currently-enabled physical outputs. On a reconnect the physical
-# output is already disabled, so this snapshot is empty — do NOT overwrite the
-# record from the first connect, or disconnect won't know what to re-enable.
+# Snapshot the currently-enabled physical outputs. The reconcile block above
+# re-enabled anything left disabled by a crashed session, so this snapshot is
+# always fresh and non-empty (unless the host was already headless).
 SNAP="$(kscreen-doctor -j | python3 -c "
 import sys,json
 for o in json.load(sys.stdin)['outputs']:
