@@ -238,6 +238,9 @@ What this project does differently:
 
 Trade-offs to be aware of:
 
+- **One session, shared canvas** — Sunshine runs a single streaming session;
+  extra clients stream into it. The canvas is sized by the first client to
+  connect, and clients that join later scale to it.
 - **No HDR** — `krfb-virtualmonitor` doesn't expose it; EVDI/KMS-based setups
   can.
 - **Stability** — `krfb-virtualmonitor` can crash in some headless/remote
