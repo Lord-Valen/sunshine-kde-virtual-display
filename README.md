@@ -14,6 +14,26 @@ kernel module required.
 > for — so the display layer here is rebuilt around `krfb-virtualmonitor` and
 > Sunshine's KWin capture.
 
+## Design rules
+
+The invariants this project upholds — and the reason it has no launcher,
+installer, autostart entry, or systemd unit:
+
+- **Sunshine owns its own lifecycle.** It runs as a plain systemd daemon
+  (user or system service); this project never launches, wraps, or replaces
+  it.
+- **The do/undo hooks are the only integration point.** All session state —
+  virtual display, sleep inhibitor, physical-output disabling — is created by
+  the `do` hook and torn down by the `undo` hook. Recovery from a crashed or
+  interrupted session is the `do` hook's reconcile pass, not a separate
+  watchdog unit.
+- **The repo is the installation.** Scripts resolve siblings via
+  `BASH_SOURCE`, so they work from any directory as long as they stay
+  together; nothing belongs on PATH or in `~/.local/bin`.
+- **Config is static.** `output_name` and `capture` are written up front;
+  no script rewrites them at startup.
+- **Userspace only.** No kernel modules, no DKMS.
+
 ## How it works
 
 The virtual display lifecycle is tied to the client connection via Sunshine's
@@ -37,14 +57,15 @@ The virtual display lifecycle is tied to the client connection via Sunshine's
    physical output.
 3. Releases the idle/sleep inhibitor.
 
-**At login / autostart** (`sunshine-start.sh`):
-
-Reconciles any leftover state from a previous session (forces the physical
-output enabled, kills orphaned `krfb-virtualmonitor` processes), writes
-`sunshine.conf` with `output_name=Virtual-SunshineHeadless` and the
-`global_prep_cmd` hooks, then launches Sunshine. The virtual output does
-**not** need to exist at Sunshine startup; it only needs to exist with that
-exact name when the `do` hook runs, which it always will.
+**Sunshine lifecycle:** this project never launches Sunshine. Run it as a
+systemd daemon — the packaged user service (Arch: `app-dev.lizardbyte.app.Sunshine.service`)
+or system service (Fedora/Debian: `sunshine.service`) — and it just works:
+`config/sunshine.conf` is fully static (`output_name` and `capture` are
+written up front), and the connect hook reconciles any leftover state from a
+previous crashed session (re-enables stale physical outputs, kills orphaned
+virtuals and inhibitors). The virtual output does **not** need to exist at
+Sunshine startup; it only needs to exist with that exact name when the `do`
+hook runs, which it always will.
 
 | Step | Tool |
 |---|---|
@@ -59,17 +80,6 @@ DRM/KMS), Sunshine's default `kms` capture can't see them — it **must** use
 Sunshine launches; Sunshine caches `output_name` at startup and will find the
 output by that name once the `do` hook creates it.
 
-## Swappable display backend
-
-Set `DISPLAY_BACKEND` before launching:
-
-- **`krfb`** (default) — `krfb-virtualmonitor`, userspace only, `capture = kwin`.
-- **`evdi`** (fallback) — kernel virtual display via `evdi-dkms`, a real DRM
-  connector, `capture = kms`. Needs `evdi-dkms` (recompiled per kernel);
-  NVIDIA untested.
-
-`sunshine-start.sh` selects the matching capture method automatically.
-
 ## Requirements
 
 KDE Plasma 6 on Wayland, plus:
@@ -77,8 +87,6 @@ KDE Plasma 6 on Wayland, plus:
 ```bash
 # Arch / CachyOS
 sudo pacman -S --needed krfb sunshine python jq libkscreen
-# evdi fallback only:
-# paru -S evdi-dkms
 ```
 
 For NVIDIA `nvenc`, the proprietary driver (`nvidia-utils`) must be installed.
@@ -86,58 +94,65 @@ AMD/Intel: change `encoder = nvenc` to `encoder = vaapi` in `config/sunshine.con
 
 ## Installation
 
-The recommended way is to run the provided installer:
+There is no installer — the repo *is* the installation. Keep it wherever you
+like (e.g. `~/projects/sunshine-kde-virtual-display`). The hooks locate their
+sibling scripts via `BASH_SOURCE`, so the scripts only have to stay together
+in one directory; nothing needs to be on PATH or in `~/.local/bin`.
 
 ```bash
-bash scripts/install.sh
+# 1. Make the hooks executable
+chmod +x scripts/sunshine-connect.sh scripts/sunshine-disconnect.sh
+
+# 2. Install the config (save your existing one first if you have one)
+mkdir -p ~/.config/sunshine
+cp config/sunshine.conf ~/.config/sunshine/sunshine.conf
 ```
 
-The installer:
-- Copies all scripts to `~/.local/bin` and marks them executable.
-- Installs `autostart/sunshine-headless.desktop` to `~/.config/autostart`.
-- Opens Sunshine's ports in UFW (if UFW is active).
-- Writes `~/.config/sunshine/sunshine.conf` with the correct `global_prep_cmd`
-  hooks (skips overwriting if the file already exists, and reminds you to check
-  the `global_prep_cmd` section).
-- Installs and enables a systemd unit for post-resume display recovery
-  (`sunshine-after-sleep.sh`).
-- Disables the upstream packaged Sunshine service if it is enabled (the autostart
-  `.desktop` file handles launching instead).
+Then set `global_prep_cmd` in `~/.config/sunshine/sunshine.conf` to absolute
+paths into the repo (replace `<repo>` with the repo's absolute path):
+
+```
+global_prep_cmd = [{"do":"<repo>/scripts/sunshine-connect.sh","undo":"<repo>/scripts/sunshine-disconnect.sh","elevated":"false"}]
+```
+
+Finally enable the Sunshine daemon itself:
+
+```bash
+# Arch (packaged user service)
+systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service
+# Fedora / Debian (packaged system service)
+sudo systemctl enable --now sunshine.service
+```
+
+> **Note:** the do/undo hooks run inside Sunshine's own process environment,
+> so Sunshine must run **as the desktop user** for them to reach the KWin
+> session. The packaged *user* service (Arch) does this out of the box. The
+> packaged *system* service runs Sunshine as a separate `sunshine` user, which
+> has no dbus/Wayland session to talk to — on Fedora/Debian, override the unit
+> to run Sunshine as your desktop user (or run it via a user unit) before
+> using the hooks.
 
 Then open `https://localhost:47990`, set your Sunshine credentials, and pair
 your client.
 
-### Manual setup
+### Optional pieces
 
-If you prefer to do it by hand:
+- **UFW**: if UFW is active, open Sunshine's ports from your LAN:
 
-```bash
-# 1. Config (save your existing sunshine.conf first if you have one)
-mkdir -p ~/.config/sunshine
-cp config/sunshine.conf ~/.config/sunshine/sunshine.conf
-
-# 2. Scripts on PATH
-mkdir -p ~/.local/bin
-cp scripts/display-backend.sh scripts/sunshine-start.sh \
-   scripts/sunshine-connect.sh scripts/sunshine-disconnect.sh \
-   scripts/sunshine-after-sleep.sh ~/.local/bin/
-chmod +x ~/.local/bin/sunshine-start.sh ~/.local/bin/sunshine-connect.sh \
-         ~/.local/bin/sunshine-disconnect.sh ~/.local/bin/sunshine-after-sleep.sh
-
-# 3. Launch on login
-cp autostart/sunshine-headless.desktop ~/.config/autostart/
-```
+  ```bash
+  LAN="$(ip route | awk '/proto kernel/ && /src/ {print $1; exit}')"
+  sudo ufw allow from "$LAN" to any port 47984:48010 proto tcp
+  sudo ufw allow from "$LAN" to any port 47998:48010 proto udp
+  sudo ufw allow from "$LAN" to any port 5353 proto udp
+  ```
 
 ## Scripts
 
 | Script | Role |
 |---|---|
-| `display-backend.sh` | Swappable backend: `create_virtual_display`, `get_virtual_display_name`, `destroy_virtual_display` |
-| `sunshine-start.sh` | Login/autostart: reconcile state, write config, launch Sunshine |
-| `sunshine-connect.sh` | `global_prep_cmd` **do**: create virtual display at client resolution, inhibit sleep, disable physical output |
+| `display-backend.sh` | Virtual-display primitives (`create_virtual_display`, `get_virtual_display_name`, `destroy_virtual_display`), sourced by the hooks |
+| `sunshine-connect.sh` | `global_prep_cmd` **do**: create virtual display at client resolution, inhibit sleep, disable physical output (also reconciles state left by a crashed session) |
 | `sunshine-disconnect.sh` | `global_prep_cmd` **undo**: re-enable physical output, destroy virtual display, release inhibitor |
-| `sunshine-after-sleep.sh` | Post-S3 resume: restore physical output state via `kscreen-doctor` |
-| `install.sh` | One-shot installer (scripts, autostart, UFW, config, systemd unit) |
 
 ## Usage
 
@@ -147,11 +162,11 @@ physical monitor is off and the host is not usable locally; everything returns
 when you disconnect.
 
 ```bash
-# Run manually (normally started automatically at login)
-~/.local/bin/sunshine-start.sh
+# Start/stop Sunshine with the usual daemon commands
+systemctl --user start app-dev.lizardbyte.app.Sunshine.service   # Arch
 
 # Test the display backend in isolation (create / discover / destroy)
-source ~/.local/bin/display-backend.sh
+source scripts/display-backend.sh
 create_virtual_display 1920x1080 SunshineHeadless && get_virtual_display_name && destroy_virtual_display
 
 # Logs
@@ -176,13 +191,18 @@ Verified on KDE Plasma 6 Wayland (NVIDIA / nvenc):
 - Physical monitor is restored on disconnect before the virtual output is
   destroyed, so the host is never left without a display.
 
-Post-S3 resume recovery (`sunshine-after-sleep.sh`) is installed and enabled but
-not yet exercised through a real suspend/resume cycle.
+Suspend during a session is inhibited by the connect hook; if the host is
+suspended anyway, the undo hook and the next connect's reconcile pass restore
+output state — no separate resume unit is needed.
 
 ## Known gotcha
 
 KWin direct scanout on Plasma 6 crops fullscreen content on the client. The
-launcher exports `KWIN_DRM_NO_DIRECT_SCANOUT=1` to avoid it.
+fix is `KWIN_DRM_NO_DIRECT_SCANOUT=1` in **KWin's own environment** (e.g.
+`~/.config/plasma-workspace/env/sunshine.sh`, exported by login on the X11
+back-end, or a wrapper around your KWin launch) — it is a compositor setting,
+not something Sunshine reads, so it does not belong in Sunshine's unit or
+config.
 
 ## Alternatives / prior art
 
@@ -214,13 +234,15 @@ What this project does differently:
   which the guide and the Windows scripts don't.
 - **Full per-session lifecycle:** the virtual display is created on connect and
   destroyed on disconnect, the physical output is re-enabled first on teardown,
-  plus reconnect handling and post-resume recovery.
+  plus reconnect handling.
 
 Trade-offs to be aware of:
 
-- **No HDR** — `krfb-virtualmonitor` doesn't expose it; EVDI/KMS-based setups can.
-- **Stability** — `krfb-virtualmonitor` can crash in some headless/remote cases;
-  the EVDI backend (`DISPLAY_BACKEND=evdi`) is an option if you hit that.
+- **No HDR** — `krfb-virtualmonitor` doesn't expose it; EVDI/KMS-based setups
+  can.
+- **Stability** — `krfb-virtualmonitor` can crash in some headless/remote
+  cases; the connect hook retries at 1920x1080 and refuses to blind the
+  physical output if the virtual isn't up.
 
 ## Roadmap
 
