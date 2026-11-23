@@ -1,30 +1,35 @@
 #!/bin/bash
-# Swappable virtual-display backend for KDE Plasma 6 / Wayland (KWin).
+# Virtual-display backend for KDE Plasma 6 / Wayland (KWin).
 #
-# KWin has no command to spawn a headless output on demand, so display creation
-# is abstracted behind three functions with two interchangeable implementations
-# selected via DISPLAY_BACKEND:
+# KWin has no command to spawn a headless output on demand, so display
+# creation is done with krfb-virtualmonitor, which creates a virtual output at
+# the *compositor* level. Userspace only, no kernel module. Sunshine must
+# capture it with `capture = kwin` (the kms backend can't see compositor-level
+# outputs).
 #
-#   krfb (default) — krfb-virtualmonitor creates a virtual output at the
-#                    *compositor* level. Userspace only, no kernel module.
-#                    Sunshine must capture it with `capture = kwin` (the kms
-#                    backend can't see compositor-level outputs).
-#   evdi (fallback)— EVDI creates a real DRM connector via the kernel module.
-#                    Sunshine captures it with the normal `capture = kms`.
-#                    Needs evdi-dkms (recompiled per kernel); NVIDIA untested.
-#
-# Public interface (consumed by sunshine-start.sh):
+# Public interface (consumed by sunshine-connect.sh / sunshine-disconnect.sh):
 #   create_virtual_display <WxH> <name-hint>  -> creates the output
 #   get_virtual_display_name                  -> echoes the name KWin assigned
 #   destroy_virtual_display                   -> tears it down
 #
-# State shared between functions via these files:
+# This file must sit next to the hook scripts that source it; they locate it
+# via BASH_SOURCE, so the whole set works from any directory.
 LOG="${LOG:-$HOME/.local/share/sunshine-headless.log}"
-DISPLAY_BACKEND="${DISPLAY_BACKEND:-krfb}"
 VDISPLAY_PIDFILE="$HOME/.local/share/sunshine-vdisplay.pid"
 VDISPLAY_NAMEFILE="$HOME/.local/share/sunshine-vdisplay.name"
 
-log() { echo "$(date -Iseconds) [$DISPLAY_BACKEND] $*" >> "$LOG"; }
+log() { echo "$(date -Iseconds) $*" >> "$LOG"; }
+
+# --- dbus session discovery --------------------------------------------------
+# Sunshine runs as a systemd daemon (user or system service), so the global_prep_cmd
+# hooks inherit an environment WITHOUT the desktop's dbus session. kscreen-doctor
+# and krfb-virtualmonitor talk to KWin over it, so recover it from the dbus daemon
+# KDE started for this user (launched with `--abstract-socket /tmp/dbus-XXXXXXX`).
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    _dbus_sock="$(pgrep -u "$(id -u)" -a dbus 2>/dev/null | grep -Eo '/tmp/dbus-[^ ]+' | head -n1)"
+    [ -n "$_dbus_sock" ] && export DBUS_SESSION_BUS_ADDRESS="unix:abstract=$_dbus_sock"
+    log "dbus: recovered DBUS_SESSION_BUS_ADDRESS from running dbus daemon"
+fi
 
 # --- helpers ----------------------------------------------------------------
 
@@ -35,10 +40,10 @@ _kscreen_output_names() {
 }
 
 # ===========================================================================
-# krfb backend (default)
+# krfb backend
 # ===========================================================================
 
-_krfb_create() {
+create_virtual_display() {
     local res="$1" name_hint="$2"
     # Snapshot existing outputs so we can identify the *new* one afterwards —
     # the assigned name isn't predictable, so diffing the output list is the
@@ -69,66 +74,11 @@ _krfb_create() {
     log "created virtual output: $new (${res})"
 }
 
-_krfb_destroy() {
-    [ -f "$VDISPLAY_PIDFILE" ] && kill "$(cat "$VDISPLAY_PIDFILE")" 2>/dev/null
-    rm -f "$VDISPLAY_PIDFILE" "$VDISPLAY_NAMEFILE"
-}
-
-# ===========================================================================
-# evdi backend (fallback)
-# ===========================================================================
-
-_evdi_create() {
-    local res="$1"
-    local before after new
-    before="$(_kscreen_output_names | sort)"
-
-    if ! lsmod | grep -q '^evdi'; then
-        sudo modprobe evdi >> "$LOG" 2>&1 || { log "ERROR: cannot load evdi module"; return 1; }
-    fi
-
-    # EVDI exposes a fresh DRM connector; KWin enables it as a real output.
-    for _ in $(seq 1 20); do
-        sleep 0.2
-        after="$(_kscreen_output_names | sort)"
-        new="$(comm -13 <(echo "$before") <(echo "$after") | head -n1)"
-        [ -n "$new" ] && break
-    done
-
-    if [ -z "$new" ]; then
-        log "ERROR: evdi did not produce a new output (is evdi-dkms installed?)"
-        return 1
-    fi
-    # Apply the requested mode on the real DRM connector.
-    kscreen-doctor "output.$new.mode.$res" >> "$LOG" 2>&1
-    echo "$new" > "$VDISPLAY_NAMEFILE"
-    log "created EVDI output: $new (${res})"
-}
-
-_evdi_destroy() {
-    rm -f "$VDISPLAY_NAMEFILE"
-    # Leave the module loaded; unloading evdi mid-session can wedge KWin.
-}
-
-# ===========================================================================
-# Public dispatch
-# ===========================================================================
-
-create_virtual_display() {
-    case "$DISPLAY_BACKEND" in
-        krfb) _krfb_create "$@" ;;
-        evdi) _evdi_create "$@" ;;
-        *)    log "ERROR: unknown DISPLAY_BACKEND '$DISPLAY_BACKEND'"; return 1 ;;
-    esac
-}
-
 get_virtual_display_name() {
     [ -f "$VDISPLAY_NAMEFILE" ] && cat "$VDISPLAY_NAMEFILE"
 }
 
 destroy_virtual_display() {
-    case "$DISPLAY_BACKEND" in
-        krfb) _krfb_destroy ;;
-        evdi) _evdi_destroy ;;
-    esac
+    [ -f "$VDISPLAY_PIDFILE" ] && kill "$(cat "$VDISPLAY_PIDFILE")" 2>/dev/null
+    rm -f "$VDISPLAY_PIDFILE" "$VDISPLAY_NAMEFILE"
 }
