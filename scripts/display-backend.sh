@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Virtual-display backend for KDE Plasma 6 / Wayland (KWin).
 #
 # KWin has no command to spawn a headless output on demand, so display

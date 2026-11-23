@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # global_prep_cmd "undo": the client disconnected. Restore local use.
 # ORDER MATTERS: re-enable the physical output(s) FIRST so a failure in any
 # later step never leaves the machine blind.

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # global_prep_cmd "do": a Moonlight/Artemis client connected.
 # 1. create the virtual display at the client's requested resolution
 # 2. inhibit idle/sleep for the session
